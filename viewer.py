@@ -1,117 +1,102 @@
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk, Gio, cairo
+from gi.repository import Gtk, Gdk, Gio, GLib, Pango
 
 
-class Overlay(Gtk.DrawingArea):
+# ---------- CSS ----------
+def apply_ocr_css(widget):
+    css = b"""
+    label {
+        color: transparent;
+        background-color: transparent;
+        padding: 0;
+        margin: 0;
+    }
+
+    label selection {
+        background-color: rgba(80, 140, 255, 0.45);
+        color: transparent;
+    }
+
+    label:hover {
+        background-color: rgba(255, 255, 255, 0.08);
+    }
+    """
+    provider = Gtk.CssProvider()
+    provider.load_from_data(css)
+    widget.get_style_context().add_provider(
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+
+# ---------- OCR Overlay ----------
+class OCRTextLayer(Gtk.Fixed):
     def __init__(self, boxes, img_w, img_h):
         super().__init__()
         self.boxes = boxes
         self.img_w = img_w
         self.img_h = img_h
 
-        # runtime state
+        self.labels = []
         self.scale = 1.0
         self.offset_x = 0
         self.offset_y = 0
 
-        # mouse click controller
-        click = Gtk.GestureClick()
-        click.connect("pressed", self.on_click)
-        self.add_controller(click)
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+        self.set_halign(Gtk.Align.FILL)
+        self.set_valign(Gtk.Align.FILL)
 
-        # keyboard controller
-        motion = Gtk.EventControllerMotion()
-        motion.connect("motion", self.on_motion)
-        self.add_controller(motion)
-        
-        self.set_draw_func(self.on_draw)
+    def rebuild(self, alloc_w, alloc_h):
+        # clear old labels
+        for lbl in self.labels:
+            self.remove(lbl)
+        self.labels.clear()
 
-        self.set_focusable(True)
-        self.set_can_focus(True)
+        if alloc_w <= 0 or alloc_h <= 0:
+            return
 
-        self.dragging = False
-        self.drag_start = None
-        self.drag_end = None
-
-
-
-    # ---------------- drawing ----------------
-
-    def on_draw(self, area, ctx, width, height):
-        # compute render transform
-        self.scale = min(width / self.img_w, height / self.img_h)
-
+        # match Gtk.Picture(CONTAIN) logic
+        self.scale = min(alloc_w / self.img_w, alloc_h / self.img_h)
         render_w = self.img_w * self.scale
         render_h = self.img_h * self.scale
 
-        self.offset_x = (width - render_w) / 2
-        self.offset_y = (height - render_h) / 2
+        self.offset_x = (alloc_w - render_w) / 2
+        self.offset_y = (alloc_h - render_h) / 2
 
         for b in self.boxes:
+            label = Gtk.Label(label=b["text"])
+            label.set_selectable(True)
+            label.set_xalign(0)
+            label.set_yalign(0)
+            label.set_wrap(False)
+
+            # scale font to OCR height
+            font_px = max(1, int(b["h"] * self.scale * 0.9))
+            attrs = Pango.AttrList()
+            attrs.insert(Pango.attr_size_new_absolute(font_px * Pango.SCALE))
+            label.set_attributes(attrs)
+
+            apply_ocr_css(label)
+
             x = self.offset_x + b["x"] * self.scale
             y = self.offset_y + b["y"] * self.scale
-            w = b["w"] * self.scale
-            h = b["h"] * self.scale
 
-            if b.get("selected"):
-                ctx.set_source_rgba(1.0, 0.75, 0.2, 0.55)
-            else:
-                ctx.set_source_rgba(0.2, 0.5, 1.0, 0.25)
+            # clip strictly inside rendered image
+            if (
+                x < self.offset_x or
+                y < self.offset_y or
+                x > self.offset_x + render_w or
+                y > self.offset_y + render_h
+            ):
+                continue
 
-            ctx.rectangle(x, y, w, h)
-            ctx.fill()
-
-    # ---------------- interaction ----------------
-
-def on_click(self, gesture, n_press, x, y):
-    state = gesture.get_current_event_state()
-    shift = state & Gdk.ModifierType.SHIFT_MASK
-
-    hit_any = False
-
-    for b in self.boxes:
-        bx = self.offset_x + b["x"] * self.scale
-        by = self.offset_y + b["y"] * self.scale
-        bw = b["w"] * self.scale
-        bh = b["h"] * self.scale
-
-        hit = bx <= x <= bx + bw and by <= y <= by + bh
-
-        if hit:
-            hit_any = True
-            if shift:
-                # toggle selection
-                b["selected"] = not b.get("selected", False)
-            else:
-                b["selected"] = True
-        else:
-            if not shift:
-                b["selected"] = False
-
-    if hit_any:
-        self.queue_draw()
+            self.put(label, int(x), int(y))
+            self.labels.append(label)
 
 
-    def on_key(self, controller, keyval, keycode, state):
-        if (
-            state & Gdk.ModifierType.CONTROL_MASK
-            and keyval == Gdk.KEY_c
-        ):
-            selected = [b["text"] for b in self.boxes if b.get("selected")]
-            if not selected:
-                return False
-
-            text = " ".join(selected)
-
-            clipboard = self.get_display().get_clipboard()
-            clipboard.set(text)
-
-            return True
-
-        return False
-
-
+# ---------- Main Viewer ----------
 class Viewer(Gtk.Application):
     def __init__(self, image_path, boxes):
         super().__init__(application_id="ocr.viewer")
@@ -120,25 +105,66 @@ class Viewer(Gtk.Application):
 
     def do_activate(self):
         win = Gtk.ApplicationWindow(application=self)
-        win.set_title("OCR Viewer")
+        win.set_title("Screenshot")
         win.set_default_size(900, 600)
 
+        # ----- Header bar -----
+        header = Gtk.HeaderBar()
+        win.set_titlebar(header)
+
+        ocr_toggle = Gtk.ToggleButton(label="OCR")
+        ocr_toggle.set_active(False)
+        header.pack_end(ocr_toggle)
+
+        # ----- Load image -----
         file = Gio.File.new_for_path(self.image_path)
         texture = Gdk.Texture.new_from_file(file)
 
         img_w = texture.get_width()
         img_h = texture.get_height()
 
-        image = Gtk.Picture.new_for_paintable(texture)
-        image.set_content_fit(Gtk.ContentFit.CONTAIN)
+        picture = Gtk.Picture.new_for_paintable(texture)
+        picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        picture.set_hexpand(True)
+        picture.set_vexpand(True)
 
+        # ----- Overlay -----
         overlay = Gtk.Overlay()
-        overlay.set_child(image)
+        overlay.set_child(picture)
 
-        draw = Overlay(self.boxes, img_w, img_h)
-        overlay.add_overlay(draw)
+        ocr_layer = OCRTextLayer(self.boxes, img_w, img_h)
+        ocr_layer.set_visible(False)
+        overlay.add_overlay(ocr_layer)
 
-        draw.grab_focus()
+        # ----- Resize tracking (PICTURE-BASED) -----
+        def on_picture_allocate(widget, allocation):
+            if ocr_layer.get_visible():
+                ocr_layer.rebuild(allocation.width, allocation.height)
+
+        def rebuild_from_picture(*_):
+            if not ocr_layer.get_visible():
+                return
+            w = picture.get_allocated_width()
+            h = picture.get_allocated_height()
+            if w > 0 and h > 0:
+                ocr_layer.rebuild(w, h)
+
+        picture.connect("notify::allocated-width", rebuild_from_picture)
+        picture.connect("notify::allocated-height", rebuild_from_picture)
+
+        # ----- Toggle behavior -----
+        def toggle_ocr(btn):
+            enabled = btn.get_active()
+            ocr_layer.set_visible(enabled)
+
+            if enabled:
+                def deferred():
+                    alloc = picture.get_allocation()
+                    ocr_layer.rebuild(alloc.width, alloc.height)
+                    return False
+                GLib.idle_add(deferred)
+
+        ocr_toggle.connect("toggled", toggle_ocr)
 
         win.set_child(overlay)
         win.present()
