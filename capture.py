@@ -11,10 +11,6 @@ from viewer import Viewer
 SAVE_DIR = os.path.expanduser("~/Pictures/Screenshots")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-image_path = os.path.join(SAVE_DIR, f"screenshot_{timestamp}.png")
-# text_path = os.path.join(SAVE_DIR, f"screenshot_{timestamp}.txt")
-
 def run(cmd):
     return subprocess.run(
         cmd,
@@ -24,6 +20,9 @@ def run(cmd):
         text=True
     )
 
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+image_path = os.path.join(SAVE_DIR, f"screenshot_{timestamp}.png")
+
 try:
     geometry = run(["slurp"]).stdout.strip()
     if not geometry:
@@ -31,6 +30,7 @@ try:
 
     run(["grim", "-g", geometry, image_path])
 
+    # copy image
     with open(image_path, "rb") as f:
         subprocess.run(
             ["wl-copy", "--type", "image/png"],
@@ -38,29 +38,10 @@ try:
             check=True
         )
 
-    # OCR
-    text = extract_text(image_path)
-    print(text)
+    boxes = extract_text(image_path)
 
-    # with open(text_path, "w", encoding="utf-8") as f:
-    #     f.write(text)
-
-    # subprocess.run(
-    #     ["wl-copy"],
-    #     input=text,
-    #     text=True,
-    #     check=True
-    # )
-
-    app = Viewer(image_path, text)
+    app = Viewer(image_path, boxes)
     app.run()
-    
-
-    subprocess.run([
-        "notify-send",
-        "Screenshot",
-        "Image and text copied"
-    ])
 
 except subprocess.CalledProcessError as e:
     subprocess.run([

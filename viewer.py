@@ -1,170 +1,192 @@
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk, Gio, GLib, Pango
+from gi.repository import Gtk, Gdk, Gio
+import cairo
 
-
-# ---------- CSS ----------
-def apply_ocr_css(widget):
+def load_css():
     css = b"""
-    label {
-        color: transparent;
-        background-color: transparent;
-        padding: 0;
-        margin: 0;
+    window {
+        background-color: #0e0e0e;
     }
 
-    label selection {
-        background-color: rgba(80, 140, 255, 0.45);
-        color: transparent;
+    button {
+        background-color: rgba(255, 255, 255, 0.06);
+        color: #eaeaea;
+        border-radius: 10px;
+        padding: 8px 14px;
+        border: none;
+        box-shadow: none;
     }
 
-    label:hover {
-        background-color: rgba(255, 255, 255, 0.08);
+    button:hover {
+        background-color: rgba(255, 255, 255, 0.12);
+    }
+
+    button:active {
+        background-color: rgba(255, 255, 255, 0.18);
+    }
+
+    button.copy {
+        background-color: rgba(255, 255, 255, 0.10);
+        font-weight: 600;
+    }
+
+    button.copy:hover {
+        background-color: rgba(255, 255, 255, 0.16);
     }
     """
     provider = Gtk.CssProvider()
     provider.load_from_data(css)
-    widget.get_style_context().add_provider(
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(),
         provider,
         Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
 
 
-# ---------- OCR Overlay ----------
-class OCRTextLayer(Gtk.Fixed):
+def normalize_boxes(boxes):
+    cleaned = []
+    for b in boxes:
+        t = b["text"].strip()
+        if len(t) < 2:
+            continue
+        if sum(c.isalnum() for c in t) < 2:
+            continue
+        cleaned.append(b)
+    return cleaned
+
+
+class OcrOverlay(Gtk.DrawingArea):
     def __init__(self, boxes, img_w, img_h):
         super().__init__()
-        self.boxes = boxes
+        self.boxes = normalize_boxes(boxes)
         self.img_w = img_w
         self.img_h = img_h
 
-        self.labels = []
-        self.scale = 1.0
-        self.offset_x = 0
-        self.offset_y = 0
-
         self.set_hexpand(True)
         self.set_vexpand(True)
-        self.set_halign(Gtk.Align.FILL)
-        self.set_valign(Gtk.Align.FILL)
+        self.set_draw_func(self.on_draw)
 
-    def rebuild(self, alloc_w, alloc_h):
-        # clear old labels
-        for lbl in self.labels:
-            self.remove(lbl)
-        self.labels.clear()
+    def on_draw(self, area, ctx, width, height):
+        scale = min(width / self.img_w, height / self.img_h)
+        rw = self.img_w * scale
+        rh = self.img_h * scale
 
-        if alloc_w <= 0 or alloc_h <= 0:
-            return
+        ox = (width - rw) / 2
+        oy = (height - rh) / 2
 
-        # match Gtk.Picture(CONTAIN) logic
-        self.scale = min(alloc_w / self.img_w, alloc_h / self.img_h)
-        render_w = self.img_w * self.scale
-        render_h = self.img_h * self.scale
-
-        self.offset_x = (alloc_w - render_w) / 2
-        self.offset_y = (alloc_h - render_h) / 2
+        ctx.set_source_rgba(0, 0, 0, 0.42)
+        ctx.paint()
+        ctx.save()
+        ctx.set_operator(cairo.OPERATOR_OVER)
+        ctx.set_source_rgba(0, 0, 0, 0.25)
 
         for b in self.boxes:
-            label = Gtk.Label(label=b["text"])
-            label.set_selectable(True)
-            label.set_xalign(0)
-            label.set_yalign(0)
-            label.set_wrap(False)
+            x = ox + b["x"] * scale
+            y = oy + b["y"] * scale
+            w = b["w"] * scale
+            h = b["h"] * scale
+            r = max(4, h * 0.25)
 
-            # scale font to OCR height
-            font_px = max(1, int(b["h"] * self.scale * 0.9))
-            attrs = Pango.AttrList()
-            attrs.insert(Pango.attr_size_new_absolute(font_px * Pango.SCALE))
-            label.set_attributes(attrs)
+            self.round_rect(ctx, x - 6, y - 3, w + 12, h + 8, r)
+            ctx.fill()
 
-            apply_ocr_css(label)
+        ctx.restore()
 
-            x = self.offset_x + b["x"] * self.scale
-            y = self.offset_y + b["y"] * self.scale
+        ctx.save()
+        ctx.set_operator(cairo.OPERATOR_CLEAR)
 
-            # clip strictly inside rendered image
-            if (
-                x < self.offset_x or
-                y < self.offset_y or
-                x > self.offset_x + render_w or
-                y > self.offset_y + render_h
-            ):
-                continue
+        for b in self.boxes:
+            x = ox + b["x"] * scale
+            y = oy + b["y"] * scale
+            w = b["w"] * scale
+            h = b["h"] * scale
+            r = max(4, h * 0.25)
 
-            self.put(label, int(x), int(y))
-            self.labels.append(label)
+            self.round_rect(ctx, x - 6, y - 3, w + 12, h + 8, r)
+            ctx.fill()
+
+        ctx.restore()
+        ctx.set_source_rgba(1, 1, 1, 0.55)
+        ctx.set_line_width(1.0)
+
+        for b in self.boxes:
+            x = ox + b["x"] * scale
+            y = oy + b["y"] * scale
+            w = b["w"] * scale
+            h = b["h"] * scale
+            r = max(4, h * 0.25)
+
+            self.round_rect(ctx, x - 6, y - 3, w + 12, h + 8, r)
+            ctx.stroke()
+
+    def round_rect(self, ctx, x, y, w, h, r):
+        ctx.new_sub_path()
+        ctx.arc(x + w - r, y + r, r, -1.57, 0)
+        ctx.arc(x + w - r, y + h - r, r, 0, 1.57)
+        ctx.arc(x + r, y + h - r, r, 1.57, 3.14)
+        ctx.arc(x + r, y + r, r, 3.14, 4.71)
+        ctx.close_path()
 
 
-# ---------- Main Viewer ----------
 class Viewer(Gtk.Application):
     def __init__(self, image_path, boxes):
         super().__init__(application_id="ocr.viewer")
         self.image_path = image_path
-        self.boxes = boxes
+        self.boxes = normalize_boxes(boxes)
 
     def do_activate(self):
+
+        load_css()
         win = Gtk.ApplicationWindow(application=self)
-        win.set_title("Screenshot")
-        win.set_default_size(900, 600)
+        win.set_title("Screenshot OCR")
+        win.set_default_size(960, 700)
 
-        # ----- Header bar -----
-        header = Gtk.HeaderBar()
-        win.set_titlebar(header)
+        ctrl = Gtk.EventControllerKey()
+        ctrl.connect("key-pressed", self.on_key, win)
+        win.add_controller(ctrl)
 
-        ocr_toggle = Gtk.ToggleButton(label="OCR")
-        ocr_toggle.set_active(False)
-        header.pack_end(ocr_toggle)
-
-        # ----- Load image -----
-        file = Gio.File.new_for_path(self.image_path)
-        texture = Gdk.Texture.new_from_file(file)
-
-        img_w = texture.get_width()
-        img_h = texture.get_height()
+        texture = Gdk.Texture.new_from_file(Gio.File.new_for_path(self.image_path))
+        img_w, img_h = texture.get_width(), texture.get_height()
 
         picture = Gtk.Picture.new_for_paintable(texture)
         picture.set_content_fit(Gtk.ContentFit.CONTAIN)
         picture.set_hexpand(True)
         picture.set_vexpand(True)
 
-        # ----- Overlay -----
         overlay = Gtk.Overlay()
         overlay.set_child(picture)
+        overlay.add_overlay(OcrOverlay(self.boxes, img_w, img_h))
 
-        ocr_layer = OCRTextLayer(self.boxes, img_w, img_h)
-        ocr_layer.set_visible(False)
-        overlay.add_overlay(ocr_layer)
+        btn_copy = Gtk.Button(label="Copy All Text")
+        btn_copy.add_css_class("copy")
+        btn_copy.connect("clicked", lambda *_: self.copy_all())
 
-        # ----- Resize tracking (PICTURE-BASED) -----
-        def on_picture_allocate(widget, allocation):
-            if ocr_layer.get_visible():
-                ocr_layer.rebuild(allocation.width, allocation.height)
+        btn_close = Gtk.Button(label="Close")
+        btn_close.connect("clicked", lambda *_: win.close())
 
-        def rebuild_from_picture(*_):
-            if not ocr_layer.get_visible():
-                return
-            w = picture.get_allocated_width()
-            h = picture.get_allocated_height()
-            if w > 0 and h > 0:
-                ocr_layer.rebuild(w, h)
+        controls = Gtk.Box(spacing=12)
+        controls.set_margin_top(10)
+        controls.set_margin_bottom(10)
+        controls.set_margin_start(10)
+        controls.set_margin_end(10)
+        controls.append(btn_copy)
+        controls.append(btn_close)
 
-        picture.connect("notify::allocated-width", rebuild_from_picture)
-        picture.connect("notify::allocated-height", rebuild_from_picture)
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        layout.append(overlay)
+        layout.append(controls)
 
-        # ----- Toggle behavior -----
-        def toggle_ocr(btn):
-            enabled = btn.get_active()
-            ocr_layer.set_visible(enabled)
-
-            if enabled:
-                def deferred():
-                    alloc = picture.get_allocation()
-                    ocr_layer.rebuild(alloc.width, alloc.height)
-                    return False
-                GLib.idle_add(deferred)
-
-        ocr_toggle.connect("toggled", toggle_ocr)
-
-        win.set_child(overlay)
+        win.set_child(layout)
         win.present()
+
+    def copy_all(self):
+        text = " ".join(b["text"] for b in self.boxes)
+        clipboard = Gdk.Display.get_default().get_clipboard()
+        clipboard.set(text)
+
+    def on_key(self, controller, keyval, keycode, state, win):
+        if keyval == Gdk.KEY_Escape:
+            win.close()
+        if state & Gdk.ModifierType.CONTROL_MASK and keyval == Gdk.KEY_c:
+            self.copy_all()
