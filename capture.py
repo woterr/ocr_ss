@@ -6,6 +6,7 @@ import os
 import sys
 
 from ocr import extract_text
+from viewer import Viewer
 
 SAVE_DIR = os.path.expanduser("~/Pictures/Screenshots")
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -50,6 +51,10 @@ try:
     #     text=True,
     #     check=True
     # )
+
+    app = Viewer(image_path, text)
+    app.run()
+    
 
     subprocess.run([
         "notify-send",
